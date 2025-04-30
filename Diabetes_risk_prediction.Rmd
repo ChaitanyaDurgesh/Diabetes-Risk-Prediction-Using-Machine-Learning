@@ -1,0 +1,547 @@
+---
+title: "project_code"
+author: "Sathvika Sagar Tavitireddy"
+date: "2025-04-20"
+output: word_document
+---
+```{r}
+# Load Required Libraries
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(caret)
+library(ROSE)
+library(pROC)
+library(janitor)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(tibble)
+library(broom)
+library(nnet)
+library(keras)
+```
+
+```{r}
+# load data
+data <- read_csv("/Users/sumanthnukala/Documents/sathvika/sem3/DPA/project/code changes/diabetes_012_health_indicators_BRFSS2015.csv")
+data <- clean_names(data)
+
+cat("Rows:", nrow(data), "  Columns:", ncol(data), "\n\n")
+# Data types for each column
+str(data)
+```
+```{r}
+summary(data)
+
+# Missing‐value summary
+missing_counts <- colSums(is.na(data))
+missing_perc   <- round(missing_counts / nrow(data) * 100, 2)
+missing_df     <- data.frame(
+  Column         = names(missing_counts),
+  MissingCount   = missing_counts,
+  MissingPercent = missing_perc
+)
+print(missing_df)
+```
+Technically, there are zero actual `NA` values, by R’s definition the dataset has no “missing” entries. However, the BRFSS survey uses codes like `999` to flag “unknown” or “refused” responses in `bmi`, `ment_hlth`, and `phys_hlth`. Those don’t show up as `NA` until we explicitly convert them. Once we replace all `999` with `NA`, we can see the true missing‐value.
+```{r}
+# clean and prepare data
+# Replace “999” with NA in the three health‑days columns
+data <- data %>%
+  mutate(
+    bmi       = na_if(bmi, 999),
+    ment_hlth = na_if(ment_hlth, 999),
+    phys_hlth = na_if(phys_hlth, 999)
+  )
+
+# verify new missing counts
+colSums(is.na(data))
+```
+Since `colSums(is.na(data))` still returns zeros after `na_if()`, it means there simply weren’t any `999` entries to convert. The dataset never contained that placeholder, so truly there are no missing values to impute. 
+```{r}
+# detect outliers
+num_cols <- c("bmi", "ment_hlth", "phys_hlth")
+
+# Function that returns the outlier indices and thresholds for one column
+detect_outliers <- function(df, col) {
+  x    <- df[[col]]
+  Q1   <- quantile(x, 0.25, na.rm = TRUE)
+  Q3   <- quantile(x, 0.75, na.rm = TRUE)
+  IQR  <- Q3 - Q1
+  lower <- Q1 - 1.5 * IQR
+  upper <- Q3 + 1.5 * IQR
+  out_idx <- which(x < lower | x > upper)
+  list(
+    column    = col,
+    lower     = lower,
+    upper     = upper,
+    count     = length(out_idx),
+    indices   = out_idx
+  )
+}
+
+# Apply across all numeric columns
+outlier_info <- lapply(num_cols, function(cn) detect_outliers(data, cn))
+# Print a summary
+lapply(outlier_info, function(x) {
+  cat("\nColumn:", x$column, 
+      "| Outliers:", x$count, 
+      "| Lower threshold:", round(x$lower,2), 
+      "| Upper threshold:", round(x$upper,2), "\n")
+})
+```
+```{r}
+# Visual Chcek with Box Plots
+# Simple boxplot for each numeric variable
+for (col in num_cols) {
+  print(
+    ggplot(data, aes_string(y = col)) +
+      geom_boxplot() +
+      labs(title = paste("Boxplot of", col)) +
+      theme_minimal()
+  )
+}
+```
+We have flagged outliers here using the classic 1.5×IQR rule and did a sanity check before we decide whether to trim, cap, or otherwise handle them. The Interquartile Range (IQR) is the span between the 25th percentile (Q1) and the 75th percentile (Q3), capturing the middle 50% of your data. Outliers are conventionally defined as points below Q1−1.5×IQR or above Q3+1.5×IQR—this rule is robust because it doesn’t rely on the mean or standard deviation, which themselves can be skewed by extremes.
+
+Observation : In the BMI distribution, values below ~13.5 or above ~41.5 are extraordinarily rare and likely represent measurement errors or extreme atypical cases that could unduly influence your models. In contrast, “days of poor mental/physical health” up to 30 are genuine survey responses—removing those would bias the analysis against people with chronic issues. That’s why we apply outlier removal only to BMI, preserving the full, valid range of the health‑days variables.
+```{r}
+# 1) Locate the BMI entry in your outlier_info list
+bmi_entry <- outlier_info[[ which(sapply(outlier_info, `[[`, "column") == "bmi") ]]
+
+# 2) Extract its outlier row‐indices
+bmi_outlier_rows <- bmi_entry$indices
+
+# 3) Report thresholds and count
+cat("BMI outlier thresholds: [", 
+    round(bmi_entry$lower,1), ",", 
+    round(bmi_entry$upper,1), "]\n")
+cat("Number of BMI outliers to remove:", 
+    length(bmi_outlier_rows), "\n\n")
+
+# 4) Remove those rows
+n_before <- nrow(data)
+data     <- data[-bmi_outlier_rows, ]
+n_after  <- nrow(data)
+
+# 5) Confirm removal
+cat("Rows before:", n_before, 
+    "| Rows after:", n_after, 
+    "| Removed:", n_before - n_after, "\n")
+```
+```{r}
+# Histograms
+for (col in num_cols) {
+  print(
+    ggplot(data, aes_string(x = col)) +
+      geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+      labs(
+        title = paste("Histogram of", col),
+        x     = col,
+        y     = "Frequency"
+      ) +
+      theme_minimal()
+  )
+}
+
+# Boxplots
+for (col in num_cols) {
+  print(
+    ggplot(data, aes_string(y = col)) +
+      geom_boxplot(fill = "salmon", outlier.shape = 16, outlier.size = 2) +
+      labs(
+        title = paste("Boxplot of", col),
+        y     = col
+      ) +
+      theme_minimal()
+  )
+}
+```
+The BMI plots reveal a clean, roughly bell‑shaped distribution centered around 25–30 with virtually no points outside the 14–42 range after outlier removal, indicating a well‑behaved continuous variable. In contrast, both mental‑health and physical‑health days are heavily zero‑inflated—most respondents report zero days of poor health—yet exhibit long, legitimate right tails up to 30 days; their boxplots’ whiskers end around 5–7 days, but the many points beyond represent real extremes rather than errors. In brief, BMI is now normally distributed for modeling, while the health‑days variables show skewed, zero‑inflated patterns that should be preserved.
+
+```{r}
+# recasting binary flags
+binary_cols <- c(
+  "high_bp", "high_chol", "chol_check", "smoker", "stroke",
+  "heart_diseaseor_attack", "phys_activity", "fruits", "veggies",
+  "hvy_alcohol_consump", "any_healthcare", "no_docbc_cost",
+  "diff_walk", "sex"
+)
+data[binary_cols] <- lapply(data[binary_cols],
+                            function(x) factor(x, levels = c(0,1)))
+
+# Factorize the 3‑level target variable
+data$diabetes_012 <- factor(
+  data$diabetes_012,
+  levels = c(0, 1, 2),
+  labels = c("No Diabetes", "Prediabetes", "Diabetes")
+)
+
+table(data$diabetes_012)
+```
+
+```{r}
+num_features <- setdiff(
+  names(data)[sapply(data, is.numeric)],
+  c("diabetes_binary")  # or any numeric target you’ve created
+)
+cor_mat <- cor(data[, num_features], use="pairwise.complete.obs")
+corrplot(cor_mat, method="color", type="upper", order="hclust", tl.cex=0.8)
+```
+We can see three clear blocks of association: socio‑economic variables (education and income) cluster tightly (dark blue), with only weak ties to age and BMI, suggesting higher education/income go hand‑in‑hand but don’t strongly predict body‐mass. In the health‑days block, mental‐health and physical‐health days both correlate moderately with each other and very strongly with general‐health rating (gen_hlth), indicating that people who rate their overall health as poorer also report more days of poor mental and physical health. BMI sits fairly independently (near‑zero correlations with most), and age shows only mild associations across the board—so we are unlikely to run into multicollinearity issues outside of the general‑health/health‑days cluster.
+
+```{r}
+# Apply standard scaling: (x – mean) / sd
+data[num_cols] <- lapply(
+  data[num_cols],
+  function(x) as.numeric(scale(x))
+)
+
+# Verify
+summary(data[num_cols])
+```
+```{r}
+# Diabetes Class Distribution
+ggplot(data, aes(x = diabetes_012)) +
+  geom_bar(fill = "#2a9d8f") +
+  labs(title = "Distribution of Diabetes Classes", x = "Class", y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+set.seed(123)
+
+# 1) Split into 80/20 train & test
+train_idx   <- createDataPartition(data$diabetes_012, p = 0.8, list = FALSE)
+train_data  <- data[train_idx, ]
+test_data   <- data[-train_idx, ]
+
+# 2) Check original class counts
+cat("Original training distribution:\n")
+print(table(train_data$diabetes_012))
+
+# Convert to binary target: 1 = Diabetes, 0 = Others
+train_data <- train_data %>%
+  mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0)) %>%
+  select(-diabetes_012)
+
+# Balance the training set using ROSE
+balanced_train <- ROSE(diabetes_binary ~ ., data = train_data, seed = 123)$data
+
+# Verify balance
+cat("\nBalanced training counts:\n")
+table(balanced_train$diabetes_binary)
+```
+Originally, the training set was heavily skewed: about 90% of examples were “No Diabetes” (166012 cases), just 2% were “Prediabetes” (3472), and around 14% were “Diabetes” (25584). This kind of imbalance can lead a model to simply predict the majority class and still look accurate, yet completely fail to identify the smaller, clinically important groups. By collapsing three‑way target into a binary flag (`1 = Diabetes`, `0 = No/Prediabetes`), we used ROSE to generate a balanced set of examples: it both oversampled the minority “Diabetes” rows and undersampled the majority “Non‑Diabetes” ones to achieve a 50/50 split. This balanced training frame ensures classifiers see as many diabetes cases as non‑diabetes ones, to mitigate bias toward the majority class and improve sensitivity to underrepresented outcomes.
+
+```{r}
+# Train Logistic Regression Model
+log_model <- glm(diabetes_binary ~ ., data = balanced_train, family = "binomial")
+summary(log_model)
+
+# Prepare Test Set (Convert Target to Binary)──
+test_data <- test_data %>%
+  mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0))
+
+# Predictions + Evaluation
+# Predict probabilities
+probs <- predict(log_model, newdata = test_data, type = "response")
+
+# Classify (threshold = 0.5)
+preds <- ifelse(probs > 0.5, 1, 0)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(
+  as.factor(preds),
+  as.factor(test_data$diabetes_binary),
+  positive = "1"
+)
+
+print(conf_matrix)
+
+# ROC Curve & AUC
+roc_obj <- roc(test_data$diabetes_binary, probs)
+auc_value <- auc(roc_obj)
+
+plot(roc_obj, main = paste("ROC Curve (AUC =", round(auc_value, 3), ")"),
+     col = "#1d3557", lwd = 3)
+
+#Summary Output
+cat("\nLogistic Regression Evaluation Metrics:\n")
+cat("Accuracy:", round(conf_matrix$overall['Accuracy'], 3), "\n")
+cat("Precision:", round(conf_matrix$byClass['Precision'], 3), "\n")
+cat("Recall:", round(conf_matrix$byClass['Recall'], 3), "\n")
+cat("AUC:", round(auc_value, 3), "\n")
+```
+We built the logistic model as our first, interpretable baseline —its job was to give us a clear, quantitative benchmark (and coefficient‑based insight) on how well a simple linear classifier can predict diabetes versus non‑diabetes. By training on balanced set and evaluating on held‑out data, we saw an AUC of 0.82, overall accuracy around 73%, strong sensitivity (~77%) but modest precision (~30%). This tells us that while the model is good at catching true diabetics (high recall), it also generates a fair number of false positives (low precision). We also learned which health indicators carry the most weight in a linear setting. In order of absolute value of largest‐magnitude coefficients:
+Cholesterol check (chol_check1):+1.385
+High blood pressure (high_bp1):+0.747
+Heavy alcohol consumption (hvy_alcohol_consump1):−0.709
+High cholesterol (high_chol1):+0.584
+General health rating (gen_hlth):+0.492
+BMI (bmi):+0.439
+So, having had a cholesterol check, high blood pressure, high cholesterol, poorer general‐health ratings, and higher BMI each strongly increase diabetes risk, while heavy drinking (in this model) is associated with lower recorded risk (perhaps reflecting survivor bias or other confounding).
+
+The next logical step is to move on to Decision Trees and Random Forests, because they can capture non‑linear relationships and interactions (e.g. how BMI and age combine to affect risk) that logistic regression misses. 
+
+```{r}
+set.seed(123)
+#Decision Tree
+dt_model <- rpart(diabetes_binary ~ ., data = balanced_train, method = "class")
+
+# Visualize tree
+rpart.plot(dt_model, main = "Decision Tree for Diabetes Prediction")
+
+# Predict on test set
+dt_preds <- predict(dt_model, newdata = test_data, type = "class")
+
+# Evaluate
+dt_conf <- confusionMatrix(as.factor(dt_preds), as.factor(test_data$diabetes_binary), positive = "1")
+print(dt_conf)
+dt_probs <- predict(dt_model, newdata = test_data)[,2]
+dt_roc <- roc(test_data$diabetes_binary, dt_probs)
+```
+A Decision Tree model was trained to predict diabetes based on health and demographic features. It achieved an accuracy of 71.5%, a recall of 73.6%, and a precision of 27.8%. While the tree was able to capture some nonlinear relationships in the data, its performance was slightly lower than the Logistic Regression model, which had an accuracy of 73% and a higher AUC of 0.82. This suggests that, for this dataset, where features like BMI, general health, and blood pressure have strong linear effects on diabetes risk, Logistic Regression was more effective. Although Decision Trees are capable of modeling complex decision boundaries, in this case the simpler linear model (Logistic Regression) provided better overall predictive performance.
+
+Although Logistic Regression performed well and the features showed strong linear effects, Random Forest and Neural Network models were also developed to explore potential hidden nonlinear relationships and feature interactions. Complex models like Random Forest and Neural Networks can capture subtle patterns that simpler models may miss, potentially improving prediction performance. Modeling these approaches ensures a comprehensive evaluation and fair comparison across different learning algorithms, strengthening the reliability of the final conclusions.
+
+```{r}
+# Random Forest
+rf_model <- randomForest(as.factor(diabetes_binary) ~ ., data = balanced_train, ntree = 100, importance = TRUE)
+
+# Predict
+rf_preds <- predict(rf_model, newdata = test_data)
+
+# Evaluate
+rf_conf <- confusionMatrix(as.factor(rf_preds), as.factor(test_data$diabetes_binary), positive = "1")
+print(rf_conf)
+
+rf_probs <- predict(rf_model, newdata = test_data, type = "prob")[,2]
+rf_roc <- roc(test_data$diabetes_binary, rf_probs)
+plot(rf_roc, col = "#2a9d8f", lwd = 2, main = "ROC Curve - Random Forest")
+cat("Random Forest AUC:", auc(rf_roc), "\n")
+
+```
+Random Forest model achieved an accuracy of 78.7%, recall of 62.5%, precision of 33.3%, and an AUC of 0.81. Compared to Logistic Regression and Decision Tree models, Random Forest improved overall accuracy and precision but showed lower sensitivity, indicating a trade-off between correctly identifying diabetic cases and overall prediction reliability.
+
+Decision Tree matched logistic in balanced accuracy and recall, and the tree structure surfaced intuitive “if–then” rules (e.g. split on high_bp → general health → age/BMI). However its overall accuracy and AUC dipped slightly, reflecting overfitting to training patterns.
+Random Forest boosted overall accuracy and AUC by averaging many trees, and greatly improved specificity and precision (fewer false alarms), but sensitivity dropped—meaning it misses more true diabetics than the simpler models.
+
+```{r}
+# 1) Random Forest feature importances
+# Numeric summary
+importance(rf_model) %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature") %>%
+  arrange(desc(MeanDecreaseGini)) %>%
+  head(10) 
+imp_mat <- importance(rf_model)
+
+rf_imp_df <- as.data.frame(imp_mat) %>%
+  rownames_to_column(var = "Feature") %>%
+  select(Feature, MeanDecreaseGini) %>%
+  arrange(desc(MeanDecreaseGini))
+
+# Plot top 10 RF features
+ggplot(rf_imp_df[1:10, ], aes(x = reorder(Feature, MeanDecreaseGini), 
+                              y = MeanDecreaseGini)) +
+  geom_col(fill = "#457b9d") +
+  coord_flip() +
+  labs(title = "Random Forest: Top 10 Features by MeanDecreaseGini",
+       x     = NULL, y = "Mean Decrease in Gini") +
+  theme_minimal()
+
+# 2) Logistic Regression “importance” via absolute coefficients
+lr_imp_df <- tidy(log_model) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(AbsEstimate = abs(estimate)) %>%
+  arrange(desc(AbsEstimate)) %>%
+  select(Feature = term, Estimate = estimate, AbsEstimate)
+
+# Plot top 10 LR features
+ggplot(lr_imp_df[1:10, ], aes(x = reorder(Feature, AbsEstimate), 
+                              y = AbsEstimate)) +
+  geom_col(fill = "#e76f51") +
+  coord_flip() +
+  labs(title = "Logistic Regression: Top 10 Features by |Coefficient|",
+       x     = NULL, y = "|Coefficient|") +
+  theme_minimal()
+```
+The feature importance plots from Random Forest and Logistic Regression reveal some consistent and notable predictors. Both models highlight `gen_hlth`, `bmi`, `high_bp`, and `diff_walk` as key features, indicating their strong influence on the target variable. Random Forest also emphasizes variables like `phys_hlth`, `income`, and `education`, which suggest nonlinear interactions that Logistic Regression might miss. In contrast, Logistic Regression gives more weight to `chol_check1`, `hvy_alcohol_consump1`, and `sex1`, showing a stronger linear association with the outcome. Overall, the agreement on several top features confirms their significance, while differences reflect the models’ distinct ways of capturing patterns—nonlinear splits for Random Forest versus linear coefficients in Logistic Regression.
+
+```{r}
+# Neural Network
+# Keras Neural Network
+
+# Scaling Selected Columns
+scale_cols <- c("bmi", "ment_hlth", "phys_hlth", "age", "gen_hlth", "education", "income")
+
+scale_data <- function(df, cols) {
+  df[, cols] <- scale(df[, cols])
+  return(df)
+}
+
+balanced_train_nn <- scale_data(balanced_train, scale_cols)
+test_data_nn <- scale_data(test_data, scale_cols)
+
+# Convert ALL non-numeric columns to numeric (except outcome)
+balanced_train_nn[] <- lapply(balanced_train_nn, function(x) if(is.character(x) || is.factor(x)) as.numeric(as.factor(x)) else x)
+test_data_nn[] <- lapply(test_data_nn, function(x) if(is.character(x) || is.factor(x)) as.numeric(as.factor(x)) else x)
+
+# Features and Labels
+x_train <- as.matrix(select(balanced_train_nn, -diabetes_binary))
+y_train <- as.numeric(balanced_train_nn$diabetes_binary)
+
+x_test <- as.matrix(select(test_data_nn, -diabetes_binary, -diabetes_012))
+y_test <- as.numeric(test_data_nn$diabetes_binary)
+```
+
+```{r}
+# Model Definition
+keras_model <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = ncol(x_train)) %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+
+# Compile Model
+keras_model %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = optimizer_adam(learning_rate = 0.0005),
+  metrics = c('accuracy')
+)
+
+# Fit Model
+history <- keras_model %>% fit(
+  x_train, y_train,
+  epochs = 80,      # <-- more epochs
+  batch_size = 32,
+  validation_split = 0.2,
+  callbacks = list(callback_early_stopping(monitor = 'val_loss', patience = 10)),
+  verbose = 0
+)
+```
+```{r}
+# Predict and Evaluate
+nn_probs <- keras_model %>% predict(x_test)
+nn_preds <- ifelse(nn_probs > 0.5, 1, 0)
+
+nn_conf <- confusionMatrix(as.factor(nn_preds), as.factor(y_test), positive = "1")
+nn_roc <- roc(y_test, as.vector(nn_probs))
+nn_auc <- auc(nn_roc)
+
+cat("\n Neural Network (Keras) Evaluation Metrics:\n")
+cat("Accuracy:", round(nn_conf$overall['Accuracy'], 3), "\n")
+cat("Precision:", round(nn_conf$byClass['Precision'], 3), "\n")
+cat("Recall:", round(nn_conf$byClass['Recall'], 3), "\n")
+cat("AUC:", round(nn_auc, 3), "\n")
+```
+1) Initial Model (Baseline Neural Network - 50 Epochs)
+At the beginning, a simple Keras Neural Network was developed with:
+
+Two dense layers (32 and 16 neurons)
+Activation: ReLU
+Final output layer: Sigmoid
+Optimizer: Adam (learning rate 0.001)
+Training: 50 epochs
+Results:
+
+Accuracy: 78.3%
+Precision: 32.3%
+Recall: 59.6%
+AUC: 0.806
+This gave a solid first baseline. However, the Recall (only ~60%) was relatively low, meaning the model was missing many diabetic cases, which is not ideal for healthcare predictions.
+
+2) First Tuning - Extended Training (75 Epochs)
+To improve learning, the model was retrained by:
+
+Increasing the number of epochs from 50 ➔ 75
+Keeping the same simple architecture
+Results after 75 epochs:
+
+Accuracy: 79.8% (improved)
+Precision: 34.5% (improved)
+Recall: 59.7% (almost same)
+AUC: 0.817 (improved)
+Longer training improved overall accuracy and AUC, but Recall did not improve significantly.
+
+3) Second Tuning - Maximizing Recall (Threshold Lowering + Class Weights)
+To maximize Recall (catch more diabetics):
+
+Lowered prediction threshold from 0.5 ➔ 0.4
+Added class weights to tell the model to "care more" about diabetic patients during training.
+Results:
+
+Accuracy: 60.7% (dropped)
+Precision: 23.5% (dropped)
+Recall: 88.4% (massively improved!)
+AUC: 0.815 (still strong)
+This approach achieved very high Recall, but sacrificed Accuracy and Precision significantly.
+This type of tuning is good when missing a diabetic is extremely dangerous, but for general balanced prediction, it is too aggressive.
+
+4) Final Tuning - Architecture Improvement + Smarter Training (80 Epochs)
+Finally, to find the best balance (good Recall and good Accuracy), deeper tuning was performed:
+
+Increased the number of hidden units (64 neurons in first layer, 32 in second layer)
+Added Dropout layers (30%) to reduce overfitting
+Lowered learning rate to 0.0005 for smoother learning
+Increased epochs to 80 with early stopping to prevent unnecessary overfitting.
+Results after 80 epochs:
+
+Accuracy: 79.3%
+Precision: 34.1%
+Recall: 62%
+AUC: 0.817
+This version achieved a higher Recall (62%) compared to earlier 75-epoch model (59.7%).
+Accuracy remained strong (79.3%), only slightly lower than best (79.8%).
+AUC is 0.817, meaning the model separates diabetics vs. non-diabetics very well.
+
+## Final model selection: 
+Throughout the tuning process, the Neural Network model underwent several improvements, starting with extending the training epochs from 50 to 75, which improved accuracy but not recall. To specifically improve recall, threshold lowering and class weights were applied, successfully increasing recall but significantly lowering accuracy and precision. Finally, a deeper architecture with dropout regularization, a reduced learning rate, and extended training to 80 epochs was implemented. This final model achieved an accuracy of 79.3%, recall of 62%, precision of 34.1%, and an AUC of 0.817, providing the best balance between sensitivity and reliability for diabetes prediction. Therefore, the 80-epoch tuned Neural Network was selected as the final model.
+
+
+```{r}
+# Performance Comparison
+# Collect metrics manually from each model (update based on your outputs)
+results <- tibble::tibble(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest", "Neural Network"),
+  Accuracy = c(conf_matrix$overall["Accuracy"], dt_conf$overall["Accuracy"], rf_conf$overall["Accuracy"], nn_conf$overall['Accuracy']),
+  Precision = c(conf_matrix$byClass["Precision"], dt_conf$byClass["Precision"], rf_conf$byClass["Precision"], nn_conf$byClass['Precision']),
+  Recall = c(conf_matrix$byClass["Recall"], dt_conf$byClass["Recall"], rf_conf$byClass["Recall"], nn_conf$byClass["Recall"]),
+  AUC = c(auc_value,auc(dt_roc), auc(rf_roc), nn_auc)
+)
+
+print(results)
+
+# ROC Curve Overlay Plot
+# Logistic Regression ROC 
+logit_roc <- roc(test_data$diabetes_binary, probs)
+
+# Plot ROC for Logistic Regression
+plot(logit_roc, col = "blue", lwd = 2, main = "ROC Curve Comparison")
+
+# Add Random Forest ROC
+lines(rf_roc, col = "darkgreen", lwd = 2)
+
+# Add Decision Tree ROC
+lines(roc(test_data$diabetes_binary, predict(dt_model, newdata = test_data)[,2]), 
+      col = "darkred", lwd = 2)
+
+# Add Neural Network ROC
+lines(nn_roc, col = "purple", lwd = 2)
+
+# Add a legend
+legend("bottomright", 
+       legend = c("Logistic Regression", "Random Forest", "Decision Tree", "Neural Network"),
+       col = c("blue", "darkgreen", "darkred", "purple"),
+       lwd = 2)
+```
+The ROC Curve Comparison clearly illustrates that the Neural Network and Logistic Regression models exhibit the strongest classification performance, as evidenced by their curves being closest to the top-left corner. Random Forest also performed well but slightly underperformed compared to the Neural Network and Logistic Regression models. The Decision Tree model showed the weakest performance, with a visibly lower ROC curve, indicating less effective separation between diabetic and non-diabetic cases. This visual comparison supports the numerical AUC results obtained during model evaluation
+
+
+## Future Improvements
+While the final Neural Network model achieved strong performance in predicting diabetes, there are several opportunities for future improvement across all key evaluation metrics, including accuracy, recall, precision, and AUC. Efforts such as advanced hyperparameter tuning, experimenting with deeper or alternative network architectures, balancing the dataset more effectively, and applying feature engineering techniques could be explored to enhance the model's predictive capability. These improvements aim to create a more reliable and robust model for accurately identifying diabetic patients.
