@@ -1,0 +1,171 @@
+---
+title: "Untitled"
+author: "Chaitanya"
+date: "2025-04-10"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 📦 Load Required Libraries
+```{r}
+library(tidyverse)
+library(janitor)
+library(corrplot)
+library(VIM)
+library(gridExtra)
+library(caret)
+library(ROSE)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(nnet)
+```
+
+# 📁 Load and Clean Data
+```{r}
+data <- read.csv("C:/Users/chait/OneDrive/Desktop/Masters/4. Spring 25/DPA/Assignments/Completed/Project/Diabetes Health Indicators Dataset/diabetes_012_health_indicators_BRFSS2015.csv")
+data <- clean_names(data)
+
+# Handle missing (999) values
+coded_missing <- c("bmi", "ment_hlth", "phys_hlth")
+for (col in coded_missing) {
+  data[[col]][data[[col]] == 999] <- NA
+  data[[col]][is.na(data[[col]])] <- median(data[[col]], na.rm = TRUE)
+}
+
+# Mode imputation
+mode_impute <- function(x) {
+  ux <- unique(x[!is.na(x)])
+  ux[which.max(tabulate(match(x, ux)))]
+}
+for (col in c("gen_hlth", "education", "income")) {
+  data[[col]][is.na(data[[col]])] <- mode_impute(data[[col]])
+}
+
+# Remove outliers
+data <- data %>% 
+  filter(
+    between(bmi, quantile(bmi, 0.25) - 1.5 * IQR(bmi), quantile(bmi, 0.75) + 1.5 * IQR(bmi)),
+    between(ment_hlth, quantile(ment_hlth, 0.25) - 1.5 * IQR(ment_hlth), quantile(ment_hlth, 0.75) + 1.5 * IQR(ment_hlth)),
+    between(phys_hlth, quantile(phys_hlth, 0.25) - 1.5 * IQR(phys_hlth), quantile(phys_hlth, 0.75) + 1.5 * IQR(phys_hlth))
+  )
+
+# Binary variables
+binary_cols <- c("high_bp", "high_chol", "chol_check", "smoker", "stroke",
+                 "heart_diseaseor_attack", "phys_activity", "fruits",
+                 "veggies", "hvy_alcohol_consump", "any_healthcare",
+                 "no_docbc_cost", "diff_walk", "sex")
+data[binary_cols] <- lapply(data[binary_cols], function(x) as.factor(ifelse(x %in% c(1), 1, 0)))
+
+# Encode target
+data$diabetes_012 <- factor(data$diabetes_012, levels = c(0, 1, 2), labels = c("No Diabetes", "Prediabetes", "Diabetes"))
+
+# Remove duplicates
+data <- distinct(data)
+```
+
+# 📊 Exploratory Data Analysis (EDA)
+```{r}
+# Class distribution
+ggplot(data, aes(diabetes_012)) + geom_bar(fill = "#2a9d8f") + theme_minimal()
+
+# Correlation matrix
+num_data <- select_if(data, is.numeric)
+corrplot(cor(num_data), method = "color", type = "upper")
+```
+
+# 🔄 Data Preparation
+```{r}
+# Train/test split
+index <- createDataPartition(data$diabetes_012, p = 0.8, list = FALSE)
+train_data <- data[index, ]
+test_data <- data[-index, ]
+
+# Convert to binary target
+train_data <- train_data %>% mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0)) %>% select(-diabetes_012)
+test_data <- test_data %>% mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0))
+
+# Balance using ROSE
+balanced_train <- ROSE(diabetes_binary ~ ., data = train_data, seed = 123)$data
+```
+
+# 🔍 Logistic Regression
+```{r}
+log_model <- glm(diabetes_binary ~ ., data = balanced_train, family = "binomial")
+log_probs <- predict(log_model, newdata = test_data, type = "response")
+log_preds <- ifelse(log_probs > 0.5, 1, 0)
+log_conf <- confusionMatrix(as.factor(log_preds), as.factor(test_data$diabetes_binary), positive = "1")
+log_roc <- roc(test_data$diabetes_binary, log_probs)
+```
+
+# 🎄 Decision Tree
+```{r}
+dt_model <- rpart(diabetes_binary ~ ., data = balanced_train, method = "class")
+dt_preds <- predict(dt_model, newdata = test_data, type = "class")
+dt_probs <- predict(dt_model, newdata = test_data)[,2]
+dt_conf <- confusionMatrix(as.factor(dt_preds), as.factor(test_data$diabetes_binary), positive = "1")
+dt_roc <- roc(test_data$diabetes_binary, dt_probs)
+```
+
+# 🌳 Random Forest
+```{r}
+rf_model <- randomForest(as.factor(diabetes_binary) ~ ., data = balanced_train, ntree = 100, importance = TRUE)
+rf_preds <- predict(rf_model, newdata = test_data)
+rf_probs <- predict(rf_model, newdata = test_data, type = "prob")[,2]
+rf_conf <- confusionMatrix(as.factor(rf_preds), as.factor(test_data$diabetes_binary), positive = "1")
+rf_roc <- roc(test_data$diabetes_binary, rf_probs)
+```
+
+# 🤖 Neural Network
+```{r}
+# 🤖 Neural Network
+scale_cols <- c("bmi", "ment_hlth", "phys_hlth", "age", "gen_hlth", "education", "income")
+
+scale_data <- function(df, cols) {
+  df[, cols] <- scale(df[, cols])
+  return(df)
+}
+
+balanced_train_nn <- scale_data(balanced_train, scale_cols)
+test_data_nn <- scale_data(test_data, scale_cols)
+
+nn_model <- nnet(diabetes_binary ~ ., data = balanced_train_nn, size = 5, maxit = 200, decay = 0.001, trace = FALSE)
+
+nn_probs <- predict(nn_model, newdata = test_data_nn, type = "raw")
+nn_preds <- ifelse(nn_probs > 0.5, 1, 0)
+
+nn_conf <- confusionMatrix(as.factor(nn_preds), as.factor(test_data_nn$diabetes_binary), positive = "1")
+nn_roc <- roc(test_data_nn$diabetes_binary, nn_probs)
+nn_auc <- auc(nn_roc)
+```
+
+# 📈 Model Evaluation Summary
+```{r}
+results <- tibble(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest", "Neural Network"),
+  Accuracy = c(log_conf$overall["Accuracy"], dt_conf$overall["Accuracy"], rf_conf$overall["Accuracy"], nn_conf$overall["Accuracy"]),
+  Precision = c(log_conf$byClass["Precision"], dt_conf$byClass["Precision"], rf_conf$byClass["Precision"], nn_conf$byClass["Precision"]),
+  Recall = c(log_conf$byClass["Recall"], dt_conf$byClass["Recall"], rf_conf$byClass["Recall"], nn_conf$byClass["Recall"]),
+  AUC = c(auc(log_roc), auc(dt_roc), auc(rf_roc), auc(nn_roc))
+)
+results
+```
+
+# 📊 ROC Curve Comparison
+```{r}
+plot(log_roc, col = "blue", lwd = 2, main = "ROC Curve Comparison")
+lines(dt_roc, col = "darkred", lwd = 2)
+lines(rf_roc, col = "darkgreen", lwd = 2)
+lines(nn_roc, col = "purple", lwd = 2)
+legend("bottomright", legend = c("Logistic", "Decision Tree", "Random Forest", "Neural Net"),
+       col = c("blue", "darkred", "darkgreen", "purple"), lwd = 2)
+```
+
+# 📝 Conclusion
+```{r}
+cat("\n- Logistic Regression offers strong recall and serves as a reliable baseline.\n- Random Forest delivers the highest AUC, making it the best overall performer.\n- Neural Networks showed promising performance after scaling features.\n- Age, BMI, General Health, and High BP were top predictors across models.\n")
+```

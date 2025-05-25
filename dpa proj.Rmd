@@ -1,0 +1,515 @@
+---
+title: "DPA - Project"
+author: "Chaitanya"
+date: "2025-04-09"
+output: word_document
+---
+
+```{r}
+# ─────────────────────────────────────────────
+# 🔧 Load Required Libraries
+# ─────────────────────────────────────────────
+library(tidyverse)
+library(janitor)
+library(corrplot)
+library(VIM)
+library(ggplot2)
+library(gridExtra)
+
+# ─────────────────────────────────────────────
+# 📁 Load and Clean Column Names
+# ─────────────────────────────────────────────
+data <- read.csv("C:/Users/chait/OneDrive/Desktop/Masters/4. Spring 25/DPA/Assignments/Completed/Project/Diabetes Health Indicators Dataset/diabetes_012_health_indicators_BRFSS2015.csv")
+data <- clean_names(data)
+
+# ─────────────────────────────────────────────
+# 🧼 Handle Missing & Coded Values
+# ─────────────────────────────────────────────
+data$bmi[data$bmi == 999] <- NA
+data$ment_hlth[data$ment_hlth == 999] <- NA
+data$phys_hlth[data$phys_hlth == 999] <- NA
+
+num_cols <- c("bmi", "ment_hlth", "phys_hlth")
+cat_cols <- c("gen_hlth", "education", "income")
+
+for (col in num_cols) {
+  data[[col]][is.na(data[[col]])] <- median(data[[col]], na.rm = TRUE)
+}
+
+mode_impute <- function(x) {
+  ux <- unique(x[!is.na(x)])
+  ux[which.max(tabulate(match(x, ux)))]
+}
+for (col in cat_cols) {
+  data[[col]][is.na(data[[col]])] <- mode_impute(data[[col]])
+}
+
+# ─────────────────────────────────────────────
+# 🔍 Outlier Removal (Column-wise)
+# ─────────────────────────────────────────────
+remove_outliers_column <- function(df, colname) {
+  vals <- df[[colname]]
+  Q1 <- quantile(vals, 0.25, na.rm = TRUE)
+  Q3 <- quantile(vals, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  df[vals >= (Q1 - 1.5 * IQR) & vals <= (Q3 + 1.5 * IQR), ]
+}
+
+for (col in num_cols) {
+  data <- remove_outliers_column(data, col)
+}
+
+# ─────────────────────────────────────────────
+# ⚙️ Standardize Binary Features
+# ─────────────────────────────────────────────
+binary_cols <- c("high_bp", "high_chol", "chol_check", "smoker", "stroke",
+                 "heart_diseaseor_attack", "phys_activity", "fruits",
+                 "veggies", "hvy_alcohol_consump", "any_healthcare",
+                 "no_docbc_cost", "diff_walk", "sex")
+
+data[binary_cols] <- lapply(data[binary_cols], function(x) as.factor(ifelse(x %in% c(1), 1, 0)))
+
+# ─────────────────────────────────────────────
+# 🧵 Factorize Target Variable
+# ─────────────────────────────────────────────
+data$diabetes_012 <- factor(data$diabetes_012,
+                            levels = c(0, 1, 2),
+                            labels = c("No Diabetes", "Prediabetes", "Diabetes"))
+
+# ─────────────────────────────────────────────
+# 📊 Exploratory Data Visualizations
+# ─────────────────────────────────────────────
+
+# ▶️ 1. Diabetes Class Distribution
+ggplot(data, aes(x = diabetes_012)) +
+  geom_bar(fill = "#2a9d8f") +
+  labs(title = "Distribution of Diabetes Classes", x = "Class", y = "Count") +
+  theme_minimal()
+
+# ▶️ 2. Numeric Variable Distributions
+p1 <- ggplot(data, aes(x = bmi)) +
+  geom_histogram(bins = 30, fill = "#e76f51", color = "black") +
+  labs(title = "BMI Distribution")
+
+p2 <- ggplot(data, aes(x = ment_hlth)) +
+  geom_histogram(bins = 30, fill = "#e9c46a", color = "black") +
+  labs(title = "Mental Health Days")
+
+p3 <- ggplot(data, aes(x = phys_hlth)) +
+  geom_histogram(bins = 30, fill = "#a8dadc", color = "black") +
+  labs(title = "Physical Health Days")
+
+grid.arrange(p1, p2, p3, ncol = 3)
+
+# ▶️ 3. Boxplots for Outlier Detection
+grid.arrange(
+  ggplot(data, aes(y = bmi)) + geom_boxplot(fill = "#f4a261") + labs(title = "Boxplot: BMI"),
+  ggplot(data, aes(y = ment_hlth)) + geom_boxplot(fill = "#ffb703") + labs(title = "Boxplot: Mental Health"),
+  ggplot(data, aes(y = phys_hlth)) + geom_boxplot(fill = "#8ecae6") + labs(title = "Boxplot: Physical Health"),
+  ncol = 3
+)
+
+# ▶️ 4. Correlation Matrix
+num_data <- select_if(data, is.numeric)
+corr_matrix <- cor(num_data, use = "complete.obs")
+corrplot(corr_matrix, method = "color", type = "upper", tl.cex = 0.8)
+
+# ▶️ 5. Feature vs Target - Stacked Bar Examples
+ggplot(data, aes(x = phys_activity, fill = diabetes_012)) +
+  geom_bar(position = "fill") +
+  labs(title = "Physical Activity by Diabetes Class", y = "Proportion") +
+  theme_minimal()
+
+ggplot(data, aes(x = fruits, fill = diabetes_012)) +
+  geom_bar(position = "fill") +
+  labs(title = "Fruit Consumption by Diabetes Class", y = "Proportion") +
+  theme_minimal()
+
+# ▶️ 6. Mean BMI & Age by Class
+data %>%
+  group_by(diabetes_012) %>%
+  summarise(
+    Mean_BMI = round(mean(bmi), 1),
+    Mean_Age = round(mean(age), 1),
+    Count = n()
+  ) %>%
+  pivot_longer(cols = c(Mean_BMI, Mean_Age), names_to = "Metric", values_to = "Value") %>%
+  ggplot(aes(x = diabetes_012, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Mean BMI and Age per Diabetes Class", y = "Value") +
+  theme_minimal()
+
+# ─────────────────────────────────────────────
+# ✅ Remove Duplicates & Save Cleaned Data
+# ─────────────────────────────────────────────
+data <- distinct(data)
+write.csv(data, "cleaned_diabetes_data.csv", row.names = FALSE)
+cat("✅ Cleaned dataset saved to 'cleaned_diabetes_data.csv'\n")
+```
+
+```{r}
+# ─────────────────────────────────────────────
+# 📦 Load Required Libraries
+# ─────────────────────────────────────────────
+library(caret)
+library(ROSE)
+library(pROC)
+library(ggplot2)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# ─────────────────────────────────────────────
+# ✂️ 1. Train/Test Split (80/20)
+# ─────────────────────────────────────────────
+
+# Re-encode diabetes_012 for clarity (in case it's not already factor)
+data$diabetes_012 <- factor(data$diabetes_012,
+                            levels = c("No Diabetes", "Prediabetes", "Diabetes"))
+
+# Create 80/20 split
+index <- createDataPartition(data$diabetes_012, p = 0.8, list = FALSE)
+train_data <- data[index, ]
+test_data  <- data[-index, ]
+
+# ─────────────────────────────────────────────
+# ⚖️ 2. Convert Target to Binary & Apply ROSE
+# ─────────────────────────────────────────────
+
+# Convert to binary target: 1 = Diabetes, 0 = Others
+train_data <- train_data %>%
+  mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0)) %>%
+  select(-diabetes_012)
+
+# Balance the training set using ROSE
+balanced_train <- ROSE(diabetes_binary ~ ., data = train_data, seed = 123)$data
+
+# Check new class balance
+table(balanced_train$diabetes_binary)
+
+# ─────────────────────────────────────────────
+# 📈 3. Train Logistic Regression Model
+# ─────────────────────────────────────────────
+
+log_model <- glm(diabetes_binary ~ ., data = balanced_train, family = "binomial")
+summary(log_model)
+
+# ─────────────────────────────────────────────
+# 🧪 4. Prepare Test Set (Convert Target to Binary)
+# ─────────────────────────────────────────────
+test_data <- test_data %>%
+  mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0))
+
+# ─────────────────────────────────────────────
+# 📊 5. Predictions + Evaluation
+# ─────────────────────────────────────────────
+
+# Predict probabilities
+probs <- predict(log_model, newdata = test_data, type = "response")
+
+# Classify (threshold = 0.5)
+preds <- ifelse(probs > 0.5, 1, 0)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(
+  as.factor(preds),
+  as.factor(test_data$diabetes_binary),
+  positive = "1"
+)
+
+print(conf_matrix)
+
+# ROC Curve & AUC
+roc_obj <- roc(test_data$diabetes_binary, probs)
+auc_value <- auc(roc_obj)
+
+plot(roc_obj, main = paste("ROC Curve (AUC =", round(auc_value, 3), ")"),
+     col = "#1d3557", lwd = 3)
+
+# ─────────────────────────────────────────────
+# ✅ Summary Output
+# ─────────────────────────────────────────────
+
+cat("\n✅ Logistic Regression Evaluation Metrics:\n")
+cat("Accuracy:", round(conf_matrix$overall['Accuracy'], 3), "\n")
+cat("Precision:", round(conf_matrix$byClass['Precision'], 3), "\n")
+cat("Recall:", round(conf_matrix$byClass['Recall'], 3), "\n")
+cat("AUC:", round(auc_value, 3), "\n")
+```
+
+```{r}
+# ─────────────────────────────────────────────
+# 📦 Load Libraries
+# ─────────────────────────────────────────────
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(caret)
+
+set.seed(123)
+
+# ─────────────────────────────────────────────
+# 📁 Use binary-labeled train and test data
+# Already prepared as:
+# - balanced_train (from ROSE)
+# - test_data (converted to binary)
+
+# ─────────────────────────────────────────────
+# 🎄 Decision Tree
+# ─────────────────────────────────────────────
+dt_model <- rpart(diabetes_binary ~ ., data = balanced_train, method = "class")
+
+# Visualize tree
+rpart.plot(dt_model, main = "Decision Tree for Diabetes Prediction")
+
+# Predict on test set
+dt_preds <- predict(dt_model, newdata = test_data, type = "class")
+
+# Evaluate
+dt_conf <- confusionMatrix(as.factor(dt_preds), as.factor(test_data$diabetes_binary), positive = "1")
+print(dt_conf)
+
+# ─────────────────────────────────────────────
+# 🌳 Random Forest
+# ─────────────────────────────────────────────
+rf_model <- randomForest(as.factor(diabetes_binary) ~ ., data = balanced_train, ntree = 100, importance = TRUE)
+
+# Predict
+rf_preds <- predict(rf_model, newdata = test_data)
+
+# Evaluate
+rf_conf <- confusionMatrix(as.factor(rf_preds), as.factor(test_data$diabetes_binary), positive = "1")
+print(rf_conf)
+
+# ─────────────────────────────────────────────
+# 📊 Compare AUC
+# ─────────────────────────────────────────────
+library(pROC)
+
+rf_probs <- predict(rf_model, newdata = test_data, type = "prob")[,2]
+rf_roc <- roc(test_data$diabetes_binary, rf_probs)
+plot(rf_roc, col = "#2a9d8f", lwd = 2, main = "ROC Curve - Random Forest")
+cat("Random Forest AUC:", auc(rf_roc), "\n")
+
+```
+
+```{r}
+# Combine numeric columns with binary target
+numeric_features <- select_if(balanced_train, is.numeric)
+numeric_features$diabetes_binary <- balanced_train$diabetes_binary
+
+# Correlation matrix
+cor_matrix <- cor(numeric_features)
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.8)
+```
+
+```{r}
+# Plot variable importance from Random Forest
+varImpPlot(rf_model, main = "Feature Importance (Random Forest)")
+
+# Numeric summary
+importance(rf_model) %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature") %>%
+  arrange(desc(MeanDecreaseGini)) %>%
+  head(10)  # Top 10 important features
+```
+
+```{r}
+# 1. 📊 Performance Comparison
+# Collect metrics manually from each model (update based on your outputs)
+results <- tibble::tibble(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest"),
+  Accuracy = c(0.714, dt_conf$overall["Accuracy"], rf_conf$overall["Accuracy"]),
+  Precision = c(0.264, dt_conf$byClass["Precision"], rf_conf$byClass["Precision"]),
+  Recall = c(0.748, dt_conf$byClass["Recall"], rf_conf$byClass["Recall"]),
+  AUC = c(0.801, NA, auc(rf_roc))
+)
+
+print(results)
+
+# 2. 🧠 Feature Importance Summary
+# Plot Top 10 Features
+importance(rf_model) %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature") %>%
+  arrange(desc(MeanDecreaseGini)) %>%
+  slice(1:10) %>%
+  ggplot(aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_col(fill = "#457b9d") +
+  coord_flip() +
+  labs(title = "Top 10 Important Features", y = "Mean Decrease Gini", x = "Feature") +
+  theme_minimal()
+
+# 3. 📈 ROC Curve Overlay Plot
+# Logistic Regression ROC (previously created)
+logit_roc <- roc(test_data$diabetes_binary, probs)
+
+# Plot all on same graph
+plot(logit_roc, col = "blue", lwd = 2, main = "ROC Curve Comparison")
+lines(rf_roc, col = "darkgreen", lwd = 2)
+lines(roc(test_data$diabetes_binary, predict(dt_model, newdata = test_data)[,2]), 
+      col = "darkred", lwd = 2)
+
+legend("bottomright", legend = c("Logistic Regression", "Random Forest", "Decision Tree"),
+       col = c("blue", "darkgreen", "darkred"), lwd = 2)
+
+# 4. 📋 Final Summary Table (Exportable)
+# Save final metrics table
+write.csv(results, "model_comparison_summary.csv", row.names = FALSE)
+cat("✅ Saved: model_comparison_summary.csv\n")
+
+# 5. 📝 Sample Conclusion Block (for Report)
+cat("
+📌 Conclusion:
+
+- Logistic Regression achieved the highest recall (0.748), making it a strong baseline for identifying diabetes-positive individuals.
+- Random Forest delivered the best AUC (0.80+) and a good trade-off between precision and recall, suggesting it may generalize better.
+- Feature importance analysis revealed that age, BMI, general health, and blood pressure were top predictors of diabetes risk.
+- Future work could involve using neural networks or boosting methods to further improve precision while maintaining high recall.
+")
+
+```
+
+```{r}
+# ─────────────────────────────────────────────
+# 📦 Load All Required Libraries
+# ─────────────────────────────────────────────
+library(tidyverse)
+library(janitor)
+library(corrplot)
+library(VIM)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(ROSE)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(nnet)
+
+set.seed(123)
+
+# ─────────────────────────────────────────────
+# 📁 Load and Clean Data
+# ─────────────────────────────────────────────
+data <- read.csv("C:/Users/chait/OneDrive/Desktop/Masters/4. Spring 25/DPA/Assignments/Completed/Project/Diabetes Health Indicators Dataset/diabetes_012_health_indicators_BRFSS2015.csv")
+data <- clean_names(data)
+
+# Handle Missing Values
+coded_missing <- c("bmi", "ment_hlth", "phys_hlth")
+for (col in coded_missing) {
+  data[[col]][data[[col]] == 999] <- NA
+  data[[col]][is.na(data[[col]])] <- median(data[[col]], na.rm = TRUE)
+}
+
+# Mode Imputation for Categoricals
+mode_impute <- function(x) {
+  ux <- unique(x[!is.na(x)])
+  ux[which.max(tabulate(match(x, ux)))]
+}
+cat_cols <- c("gen_hlth", "education", "income")
+for (col in cat_cols) {
+  data[[col]][is.na(data[[col]])] <- mode_impute(data[[col]])
+}
+
+# Outlier Removal
+remove_outliers_column <- function(df, colname) {
+  vals <- df[[colname]]
+  Q1 <- quantile(vals, 0.25)
+  Q3 <- quantile(vals, 0.75)
+  IQR <- Q3 - Q1
+  df[vals >= (Q1 - 1.5 * IQR) & vals <= (Q3 + 1.5 * IQR), ]
+}
+for (col in c("bmi", "ment_hlth", "phys_hlth")) {
+  data <- remove_outliers_column(data, col)
+}
+
+# Standardize Binary Features
+binary_cols <- c("high_bp", "high_chol", "chol_check", "smoker", "stroke",
+                 "heart_diseaseor_attack", "phys_activity", "fruits",
+                 "veggies", "hvy_alcohol_consump", "any_healthcare",
+                 "no_docbc_cost", "diff_walk", "sex")
+data[binary_cols] <- lapply(data[binary_cols], function(x) as.factor(ifelse(x %in% c(1), 1, 0)))
+
+# Label Encode Target
+data$diabetes_012 <- factor(data$diabetes_012, levels = c(0, 1, 2), labels = c("No Diabetes", "Prediabetes", "Diabetes"))
+
+# Remove Duplicates
+data <- distinct(data)
+
+# Split Data
+index <- createDataPartition(data$diabetes_012, p = 0.8, list = FALSE)
+train_data <- data[index, ]
+test_data <- data[-index, ]
+
+# Binary Classification Setup
+train_data <- train_data %>% mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0)) %>% select(-diabetes_012)
+test_data <- test_data %>% mutate(diabetes_binary = ifelse(diabetes_012 == "Diabetes", 1, 0))
+
+# ROSE Balancing
+balanced_train <- ROSE(diabetes_binary ~ ., data = train_data, seed = 123)$data
+
+# Logistic Regression
+log_model <- glm(diabetes_binary ~ ., data = balanced_train, family = "binomial")
+log_probs <- predict(log_model, newdata = test_data, type = "response")
+log_preds <- ifelse(log_probs > 0.5, 1, 0)
+log_conf <- confusionMatrix(as.factor(log_preds), as.factor(test_data$diabetes_binary), positive = "1")
+log_roc <- roc(test_data$diabetes_binary, log_probs)
+log_auc <- auc(log_roc)
+
+# Decision Tree
+dt_model <- rpart(diabetes_binary ~ ., data = balanced_train, method = "class")
+dt_preds <- predict(dt_model, newdata = test_data, type = "class")
+dt_conf <- confusionMatrix(as.factor(dt_preds), as.factor(test_data$diabetes_binary), positive = "1")
+dt_probs <- predict(dt_model, newdata = test_data)[,2]
+dt_roc <- roc(test_data$diabetes_binary, dt_probs)
+
+# Random Forest
+rf_model <- randomForest(as.factor(diabetes_binary) ~ ., data = balanced_train, ntree = 100, importance = TRUE)
+rf_preds <- predict(rf_model, newdata = test_data)
+rf_probs <- predict(rf_model, newdata = test_data, type = "prob")[,2]
+rf_conf <- confusionMatrix(as.factor(rf_preds), as.factor(test_data$diabetes_binary), positive = "1")
+rf_roc <- roc(test_data$diabetes_binary, rf_probs)
+
+# Neural Network
+scale_cols <- c("bmi", "ment_hlth", "phys_hlth", "age", "gen_hlth", "education", "income")
+scale_data <- function(df, cols) {
+  df[, cols] <- scale(df[, cols])
+  return(df)
+}
+balanced_train_nn <- scale_data(balanced_train, scale_cols)
+test_data_nn <- scale_data(test_data, scale_cols)
+
+nn_model <- nnet(diabetes_binary ~ ., data = balanced_train_nn, size = 5, maxit = 200, decay = 0.001, trace = FALSE)
+nn_probs <- predict(nn_model, newdata = test_data_nn, type = "raw")
+nn_preds <- ifelse(nn_probs > 0.5, 1, 0)
+nn_conf <- confusionMatrix(as.factor(nn_preds), as.factor(test_data_nn$diabetes_binary), positive = "1")
+nn_roc <- roc(test_data_nn$diabetes_binary, nn_probs)
+nn_auc <- auc(nnn_roc)
+
+# Model Comparison Summary
+results <- tibble(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest", "Neural Network"),
+  Accuracy = c(log_conf$overall["Accuracy"], dt_conf$overall["Accuracy"], rf_conf$overall["Accuracy"], nn_conf$overall["Accuracy"]),
+  Precision = c(log_conf$byClass["Precision"], dt_conf$byClass["Precision"], rf_conf$byClass["Precision"], nn_conf$byClass["Precision"]),
+  Recall = c(log_conf$byClass["Recall"], dt_conf$byClass["Recall"], rf_conf$byClass["Recall"], nn_conf$byClass["Recall"]),
+  AUC = c(auc(log_roc), auc(dt_roc), auc(rf_roc), auc(nn_roc))
+)
+results
+
+write.csv(results, "model_comparison_summary_updated.csv", row.names = FALSE)
+
+# ROC Curve Comparison
+plot(log_roc, col = "blue", lwd = 2, main = "ROC Curve Comparison")
+lines(dt_roc, col = "darkred", lwd = 2)
+lines(rf_roc, col = "darkgreen", lwd = 2)
+lines(nnn_roc, col = "purple", lwd = 2)
+legend("bottomright", legend = c("Logistic", "Decision Tree", "Random Forest", "Neural Net"),
+       col = c("blue", "darkred", "darkgreen", "purple"), lwd = 2)
+
+# Feature Importance Plot
+varImpPlot(rf_model, main = "Feature Importance (Random Forest)")
+
+```
